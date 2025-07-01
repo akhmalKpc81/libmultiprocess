@@ -2,23 +2,32 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <mp/proxy-io.h>
 #include <mp/test/foo.capnp.h>
 #include <mp/test/foo.capnp.proxy.h>
-#include <mp/test/foo.h>
 
 #include <capnp/capability.h>
-#include <cstdio>
-#include <future>
+#include <capnp/rpc.h>
+#include <cstring>
 #include <functional>
+#include <future>
 #include <iostream>
-#include <memory>
+#include <kj/async.h>
+#include <kj/async-io.h>
 #include <kj/common.h>
+#include <kj/debug.h>
 #include <kj/memory.h>
 #include <kj/test.h>
+#include <memory>
+#include <mp/proxy.h>
+#include <mp/proxy-io.h>
+#include <optional>
+#include <set>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace mp {
 namespace test {
@@ -40,12 +49,14 @@ namespace test {
 class TestSetup
 {
 public:
-    std::thread thread;
     std::function<void()> server_disconnect;
     std::function<void()> client_disconnect;
     std::promise<std::unique_ptr<ProxyClient<messages::FooInterface>>> client_promise;
     std::unique_ptr<ProxyClient<messages::FooInterface>> client;
     ProxyServer<messages::FooInterface>* server{nullptr};
+    //! Thread variable should be after other struct members so the thread does
+    //! not start until the other members are initialized.
+    std::thread thread;
 
     TestSetup(bool client_owns_connection = true)
         : thread{[&] {
@@ -257,12 +268,12 @@ KJ_TEST("Calling IPC method, disconnecting and blocking during the call")
     // ProxyServer objects associated with the connection. Having an in-progress
     // RPC call requires keeping the ProxyServer longer.
 
+    std::promise<void> signal;
     TestSetup setup{/*client_owns_connection=*/false};
     ProxyClient<messages::FooInterface>* foo = setup.client.get();
     KJ_EXPECT(foo->add(1, 2) == 3);
 
     foo->initThreadMap();
-    std::promise<void> signal;
     setup.server->m_impl->m_fn = [&] {
         EventLoopRef loop{*setup.server->m_context.loop};
         setup.client_disconnect();
@@ -278,6 +289,11 @@ KJ_TEST("Calling IPC method, disconnecting and blocking during the call")
     }
     KJ_EXPECT(disconnected);
 
+    // Now that the disconnect has been detected, set signal allowing the
+    // callFnAsync() IPC call to return. Since signalling may not wake up the
+    // thread right away, it is important for the signal variable to be declared
+    // *before* the TestSetup variable so is not destroyed while
+    // signal.get_future().get() is called.
     signal.set_value();
 }
 
